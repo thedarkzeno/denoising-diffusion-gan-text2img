@@ -252,12 +252,31 @@ class SmallCondAttnDiscriminator(nn.Module):
 class Discriminator_large(nn.Module):
   """A time-dependent discriminator for large images (CelebA, LSUN)."""
 
-  def __init__(self, nc = 1, ngf = 32, t_emb_dim = 128, act=nn.LeakyReLU(0.2), cond_size=768):
+  def __init__(self, nc = 1, ngf = 32, t_emb_dim = 128, act=nn.LeakyReLU(0.2), cond_size=768, attn_pool=False, attn_pool_kw=None):
     super().__init__()
     # Gaussian random feature embedding layer for time
     self.cond_proj = nn.Linear(cond_size, ngf*8) 
     self.act = act
-    
+    if attn_pool:
+        if attn_pool_kw is None:
+            attn_pool_kw = dict(
+                depth=1,
+                dim_head = 64,
+                heads = 8,
+                num_latents = 64,
+                num_latents_mean_pooled = 4, # number of latents derived from mean pooled representation of the sequence
+                max_seq_len = 512,
+                ff_mult = 4,
+                cosine_sim_attn = False,
+            )
+        self.attn_pool = layers.PerceiverResampler(
+            dim=cond_size, 
+            **attn_pool_kw,
+        )
+        max_text_len = 512
+        self.null_text_embed = torch.nn.Parameter(torch.randn(1, max_text_len, cond_size))
+    else:
+        self.attn_pool = None
     self.t_embed = TimestepEmbedding(
             embedding_dim=t_emb_dim,
             hidden_dim=t_emb_dim,
@@ -317,7 +336,21 @@ class Discriminator_large(nn.Module):
     out = self.act(out)
     
     out = out.view(out.shape[0], out.shape[1], -1).sum(2)
-    out = self.end_linear(out) + (self.cond_proj(cond) * out).sum(dim=1, keepdim=True)
+
+    if self.attn_pool is not None:
+        (cond_pooled, cond, cond_mask) = cond
+        if len(cond_mask.shape) == 2:
+            cond_mask = cond_mask.view(cond_mask.shape[0], cond_mask.shape[1], 1)
+        cond = torch.where(
+            cond_mask,
+            cond,
+            self.null_text_embed[:, :cond.shape[1]]
+        )
+        cond = self.attn_pool(cond)
+        cond = cond.mean(dim=1)
+    cond = self.cond_proj(cond)
+
+    out = self.end_linear(out) + (cond * out).sum(dim=1, keepdim=True)
     return out
 
 
