@@ -227,6 +227,20 @@ def ddgan_sd_v9():
     cfg['model']['text_encoder'] = "openclip/ViT-H-14/laion2b_s32b_b79k" 
     return cfg
 
+def ddgan_sd_v10():
+    cfg = ddgan_sd_v9()
+    cfg['model']['num_timesteps'] = 2
+    return cfg
+
+def ddgan_laion2b_v2():
+    cfg = ddgan_sd_v9()
+    return cfg
+
+def ddgan_sd_v11():
+    cfg = ddgan_sd_v10()
+    cfg['model']['image_size'] = 512
+    return cfg
+
 models = [
     ddgan_cifar10_cond17, # cifar10, cross attn for discr
     ddgan_cifar10_cond18, # cifar10, xl encoder
@@ -264,6 +278,9 @@ models = [
     ddgan_sd_v7,
     ddgan_sd_v8,
     ddgan_sd_v9,
+    ddgan_sd_v10,
+    ddgan_sd_v11,
+    ddgan_laion2b_v2,
 ]
 
 def get_model(model_name):
