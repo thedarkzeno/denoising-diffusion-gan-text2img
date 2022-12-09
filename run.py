@@ -236,6 +236,10 @@ def ddgan_laion2b_v2():
     cfg = ddgan_sd_v9()
     return cfg
 
+def ddgan_ddb_v1():
+    cfg = ddgan_sd_v9()
+    return cfg
+
 def ddgan_sd_v11():
     cfg = ddgan_sd_v10()
     cfg['model']['image_size'] = 512
@@ -281,6 +285,7 @@ models = [
     ddgan_sd_v10,
     ddgan_sd_v11,
     ddgan_laion2b_v2,
+    ddgan_ddb_v1,
 ]
 
 def get_model(model_name):
