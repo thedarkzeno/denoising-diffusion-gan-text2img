@@ -237,12 +237,23 @@ def ddgan_laion2b_v2():
     return cfg
 
 def ddgan_ddb_v1():
-    cfg = ddgan_sd_v9()
+    cfg = ddgan_sd_v10()
     return cfg
 
 def ddgan_sd_v11():
     cfg = ddgan_sd_v10()
     cfg['model']['image_size'] = 512
+    return cfg
+
+def ddgan_ddb_v2():
+    cfg = ddgan_ddb_v1()
+    cfg['model']['num_timesteps'] = 1
+    return cfg
+
+def ddgan_ddb_v3():
+    cfg = ddgan_ddb_v1()
+    cfg['model']['num_channels_dae'] = 192
+    cfg['model']['num_timesteps'] = 2
     return cfg
 
 models = [
@@ -286,6 +297,8 @@ models = [
     ddgan_sd_v11,
     ddgan_laion2b_v2,
     ddgan_ddb_v1,
+    ddgan_ddb_v2,
+    ddgan_ddb_v3
 ]
 
 def get_model(model_name):

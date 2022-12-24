@@ -62,3 +62,24 @@ class CLIPImageEncoder(nn.Module):
 
 
 
+class OpenCLIPImageEncoder(nn.Module):
+
+    def __init__(self, model="ViT-B/32", pretrained="openai"):
+        super().__init__()
+        model, _, preprocess = open_clip.create_model_and_transforms(model, pretrained=pretrained)
+        self.tokenizer = open_clip.get_tokenizer(model)
+        CLIP_MEAN = [0.48145466, 0.4578275, 0.40821073]
+        CLIP_STD = [0.26862954, 0.26130258, 0.27577711]
+        mean = torch.tensor(CLIP_MEAN).view(1, 3, 1, 1)
+        std = torch.tensor(CLIP_STD).view(1, 3, 1, 1)
+        self.register_buffer("mean", mean)
+        self.register_buffer("std", std)
+
+    def forward_image(self, x):
+        x = torch.nn.functional.interpolate(x, mode='bicubic', size=(224, 224))
+        x = (x-self.mean)/self.std
+        return self.model.encode_image(x)
+
+    def forward_text(self, texts):
+        toks = self.tokenizer.tokenize(texts, truncate=True).to(self.mean.device)
+        return self.model.encode_text(toks)
