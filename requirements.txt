@@ -8,3 +8,8 @@ lmdb
 matplotlib
 scipy
 ninja
+einops
+einops_exts
+braceexpand
+transformers
+open-clip-torch
