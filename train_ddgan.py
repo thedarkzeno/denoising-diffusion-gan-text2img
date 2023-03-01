@@ -32,6 +32,9 @@ from encoder import build_encoder
 from utils import ResampledShards2
 from torch.utils.tensorboard import SummaryWriter
 
+from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
+from datasets import load_dataset
+
 
 def log_and_continue(exn):
     logging.warning(f'Handling webdataset error ({repr(exn)}). Ignoring.')
@@ -208,6 +211,8 @@ def get_autocast(precision):
     else:
         return suppress 
 
+
+
 def train(rank, gpu, args):
     from score_sde.models.discriminator import Discriminator_small, Discriminator_large, CondAttnDiscriminator, SmallCondAttnDiscriminator
     from score_sde.models.ncsnpp_generator_adagn import NCSNpp
@@ -221,110 +226,69 @@ def train(rank, gpu, args):
     batch_size = args.batch_size
     
     nz = args.nz #latent dimension
-    
-    if args.dataset == 'cifar10':
-        dataset = CIFAR10('./data', train=True, transform=transforms.Compose([
-                        transforms.Resize(32),
-                        transforms.RandomHorizontalFlip(),
-                        transforms.ToTensor(),
-                        transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5))]), download=True)
-       
-    
-    elif args.dataset == 'stackmnist':
-        train_transform, valid_transform = _data_transforms_stacked_mnist()
-        dataset = StackedMNIST(root='./data', train=True, download=False, transform=train_transform)
-        
-    elif args.dataset == 'lsun':
-        
-        train_transform = transforms.Compose([
-                        transforms.Resize(args.image_size),
-                        transforms.CenterCrop(args.image_size),
-                        transforms.RandomHorizontalFlip(),
-                        transforms.ToTensor(),
-                        transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5))
-                    ])
 
-        train_data = LSUN(root='/datasets/LSUN/', classes=['church_outdoor_train'], transform=train_transform)
-        subset = list(range(0, 120000))
-        dataset = torch.utils.data.Subset(train_data, subset)
-      
+    tokenizer = CLIPTokenizer.from_pretrained(args.text_encoder)
+    CLIPTextModel.from_pretrained(args.text_encoder).to(device)
+
+    def tokenize_captions(examples):
+        #leave 10% blank to get better results from classifier free guidance
+        captions = [caption if random.random() > 0.1 else "" for caption in examples[args.caption_column]]
+        # captions = [caption for caption in examples[caption_column]]
+        # print(captions)
+        text_inputs = tokenizer(captions, max_length=args.max_seq_length, padding="max_length", truncation=True)
+        examples["input_ids"] = text_inputs.input_ids
+        examples["attention_mask"] = text_inputs.attention_mask
+        return examples
+
+    def transform_images(examples):
+        images = [augmentations(image.convert("RGB")) for image in examples["image"]]
+        return {"input": images}
+
+    dataset = load_dataset(
+            args.dataset,
+            cache_dir="./cache",
+            split="train",
+    )
+
+    augmentations = transforms.Compose(
+        [
+            transforms.Resize(args.image_size, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.CenterCrop(args.image_size),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5)),
+        ]
+    )
+
     
-    elif args.dataset == 'celeba_256':
-        train_transform = transforms.Compose([
-                transforms.Resize(args.image_size),
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-                transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5))
-            ])
-        dataset = LMDBDataset(root='/datasets/celeba-lmdb/', name='celeba', train=True, transform=train_transform)
-    elif args.dataset == "image_folder":
-        train_transform = transforms.Compose([
-                transforms.Resize(args.image_size),
-                transforms.CenterCrop(args.image_size),
-                # transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-                transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5))
-            ])
-        dataset = ImageFolder(root=args.dataset_root, transform=train_transform)
-    elif args.dataset == 'wds':
-        import webdataset as wds
-        if args.preprocessing == "resize":
-            train_transform = transforms.Compose([
-                    transforms.Resize(args.image_size),
-                    transforms.CenterCrop(args.image_size),
-                    transforms.ToTensor(),
-                    transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5))
-            ])
-        elif args.preprocessing == "random_resized_crop_v1":
-            train_transform = transforms.Compose([
-                    transforms.RandomResizedCrop(args.image_size, scale=(0.95, 1.0), interpolation=3),
-                    transforms.ToTensor(),
-                    transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5))
-            ])
-        shards = glob(os.path.join(args.dataset_root, "*.tar")) if os.path.isdir(args.dataset_root)  else args.dataset_root
-        pipeline = [ResampledShards2(shards)]
-        pipeline.extend([
-            wds.split_by_node,
-            wds.split_by_worker,
-            wds.tarfile_to_samples(handler=log_and_continue),
-            wds.shuffle(
-                bufsize=5000,
-                initial=1000,
-            ),
-        ])
-        pipeline.extend([
-            wds.select(filter_no_caption),
-            wds.decode("pilrgb", handler=log_and_continue),
-            wds.rename(image="jpg;png"),
-            wds.map_dict(image=train_transform),
-            wds.to_tuple("image","txt"),
-            wds.batched(batch_size, partial=False),
-        ])
-        dataset = wds.DataPipeline(*pipeline)
-        data_loader = wds.WebLoader(
-            dataset,
-            batch_size=None,
-            shuffle=False,
-            num_workers=8,
+    
+    dataset.set_transform(transform_images)
+
+    dataset = dataset["train"]
+
+    dataset = dataset.map(
+            function=tokenize_captions,
+            batched=True,
+            batch_size=32,
+            remove_columns=[col for col in column_names if col != image_column],
+            num_proc=args.preprocessing_num_workers,
+            load_from_cache_file=not args.overwrite_cache,
+            desc="Running tokenizer on train dataset",
         )
     
-    if args.dataset != "wds":
-        train_sampler = torch.utils.data.distributed.DistributedSampler(
-            dataset,
-            num_replicas=args.world_size,
-            rank=rank
-        )
-        data_loader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=4,
-            drop_last=True,
-            pin_memory=True,
-            sampler=train_sampler,
-        )
-    text_encoder = build_encoder(name=args.text_encoder, masked_mean=args.masked_mean).to(device)
-    args.cond_size = text_encoder.output_size
+    train_sampler = torch.utils.data.distributed.DistributedSampler(dataset,
+                                                                    num_replicas=args.world_size,
+                                                                    rank=rank)
+    data_loader = torch.utils.data.DataLoader(dataset,
+                                               batch_size=batch_size,
+                                               shuffle=False,
+                                               num_workers=4,
+                                               pin_memory=True,
+                                               sampler=train_sampler,
+                                               drop_last = True)
+        
+    
+
+    # args.cond_size = text_encoder.output_size
     netG = NCSNpp(args).to(device)
     nb_params = 0
     for param in netG.parameters():
@@ -334,23 +298,23 @@ def train(rank, gpu, args):
     if args.discr_type == "small":    
         netD = Discriminator_small(nc = 2*args.num_channels, ngf = args.ngf,
                                t_emb_dim = args.t_emb_dim,
-                               cond_size=text_encoder.output_size,
+                               cond_size=args.cond_size,
                                act=nn.LeakyReLU(0.2)).to(device)
     elif args.discr_type == "small_cond_attn":    
         netD = SmallCondAttnDiscriminator(nc = 2*args.num_channels, ngf = args.ngf,
                                t_emb_dim = args.t_emb_dim,
-                               cond_size=text_encoder.output_size,
+                               cond_size=args.cond_size,
                                act=nn.LeakyReLU(0.2)).to(device)
 
     elif args.discr_type == "large":
         netD = Discriminator_large(nc = 2*args.num_channels, ngf = args.ngf, 
                                 t_emb_dim = args.t_emb_dim,
-                                cond_size=text_encoder.output_size,
+                                cond_size=args.cond_size,
                                 act=nn.LeakyReLU(0.2)).to(device)
     elif args.discr_type == "large_attn_pool":
         netD = Discriminator_large(nc = 2*args.num_channels, ngf = args.ngf, 
                                 t_emb_dim = args.t_emb_dim,
-                                cond_size=text_encoder.output_size,
+                                cond_size=args.cond_size,
                                 attn_pool=True,
                                 act=nn.LeakyReLU(0.2)).to(device)
 
@@ -359,7 +323,7 @@ def train(rank, gpu, args):
             nc = 2*args.num_channels, 
             ngf = args.ngf, 
             t_emb_dim = args.t_emb_dim,
-            cond_size=text_encoder.output_size,
+            cond_size=args.cond_size,
             act=nn.LeakyReLU(0.2)).to(device)
 
     broadcast_params(netG.parameters())
@@ -432,22 +396,20 @@ def train(rank, gpu, args):
         global_step, epoch, init_epoch = 0, 0, 0
     use_cond_attn_discr = args.discr_type in ("large_cond_attn", "small_cond_attn", "large_attn_pool")
     for epoch in range(init_epoch, args.num_epoch+1):
-        if args.dataset == "wds":
-            os.environ["WDS_EPOCH"] = str(epoch)
-        else:
-            train_sampler.set_epoch(epoch)
+        train_sampler.set_epoch(epoch)
        
-        for iteration, (x, y) in enumerate(data_loader):
+        for iteration, batch in enumerate(data_loader):
             #print(x.shape)
-            if args.dataset != "wds":
-                y = [str(yi) for yi in y.tolist()]
+            # if args.dataset != "wds":
+            #     y = [str(yi) for yi in y.tolist()]
             
-            if args.classifier_free_guidance_proba:
-                u = (np.random.uniform(size=len(y)) <= args.classifier_free_guidance_proba).tolist()
-                y = ["" if ui else yi for yi,ui in zip(y, u)]
+            # if args.classifier_free_guidance_proba:
+            #     u = (np.random.uniform(size=len(y)) <= args.classifier_free_guidance_proba).tolist()
+            #     y = ["" if ui else yi for yi,ui in zip(y, u)]
 
             with torch.no_grad():
-                cond_pooled, cond, cond_mask = text_encoder(y, return_only_pooled=False)
+                cond = text_encoder(batch["input_ids"].to(device))[0]
+                cond_mask = batch["attention_mask"].to(device).bool()
 
             for p in netD.parameters():  
                 p.requires_grad = True  
@@ -455,7 +417,7 @@ def train(rank, gpu, args):
             netD.zero_grad()
             
             #sample from p(x_0)
-            real_data = x.to(device, non_blocking=True)
+            real_data = batch["input"].to(device, non_blocking=True)
             
             #sample t
             t = torch.randint(0, args.num_timesteps, (real_data.size(0),), device=device)
@@ -463,7 +425,7 @@ def train(rank, gpu, args):
             x_t, x_tp1 = q_sample_pairs(coeff, real_data, t)
             x_t.requires_grad = True
             
-            cond_for_discr = (cond_pooled, cond, cond_mask) if use_cond_attn_discr else cond_pooled
+            cond_for_discr = (cond, cond_mask)
             if args.grad_penalty_cond:
                 if use_cond_attn_discr:
                     #cond_pooled.requires_grad = True
@@ -532,12 +494,12 @@ def train(rank, gpu, args):
                     ginp  = x_tp1.detach()
                     ginp.requires_grad = True
                     latent_z.requires_grad = True
-                    cond_pooled.requires_grad = True
+                    # cond_pooled.requires_grad = True
                     cond.requires_grad = True
                     #cond_mask.requires_grad = True
-                    x_0_predict = netG(ginp, t, latent_z, cond=(cond_pooled, cond, cond_mask))
+                    x_0_predict = netG(ginp, t, latent_z, cond=(cond, cond_mask))
                 else:
-                    x_0_predict = netG(x_tp1.detach(), t, latent_z, cond=(cond_pooled, cond, cond_mask))
+                    x_0_predict = netG(x_tp1.detach(), t, latent_z, cond=(cond, cond_mask))
                 x_pos_sample = sample_posterior(pos_coeff, x_0_predict, x_tp1, t)
                 
                 output = netD(x_pos_sample, t, x_tp1.detach(), cond=cond_for_discr).view(-1)
@@ -552,7 +514,7 @@ def train(rank, gpu, args):
                 #inds = torch.flip(torch.arange(len(x_t)), dims=(0,))
                 with autocast():
                     inds = torch.cat([torch.arange(1,len(x_t)),torch.arange(1)])
-                    cond_for_discr_mis =  (cond_pooled[inds], cond[inds], cond_mask[inds]) if use_cond_attn_discr else cond_pooled[inds]
+                    cond_for_discr_mis =  (cond[inds], cond_mask[inds])
                     D_real_mis = netD(x_t, t, x_tp1.detach(), cond=cond_for_discr_mis).view(-1)
                     errD_real_mis = F.softplus(D_real_mis)
                     errD_real_mis = errD_real_mis.mean()
@@ -585,12 +547,12 @@ def train(rank, gpu, args):
                     ginp  = x_tp1.detach()
                     ginp.requires_grad = True
                     latent_z.requires_grad = True
-                    cond_pooled.requires_grad = True
+                    # cond_pooled.requires_grad = True
                     cond.requires_grad = True
                     #cond_mask.requires_grad = True
-                    x_0_predict = netG(ginp, t, latent_z, cond=(cond_pooled, cond, cond_mask))
+                    x_0_predict = netG(ginp, t, latent_z, cond=(cond, cond_mask))
                 else:
-                    x_0_predict = netG(x_tp1.detach(), t, latent_z, cond=(cond_pooled, cond, cond_mask))
+                    x_0_predict = netG(x_tp1.detach(), t, latent_z, cond=(cond, cond_mask))
                 x_pos_sample = sample_posterior(pos_coeff, x_0_predict, x_tp1, t)
                 
                 output = netD(x_pos_sample, t, x_tp1.detach(), cond=cond_for_discr).view(-1)
@@ -618,7 +580,7 @@ def train(rank, gpu, args):
             if iteration % 1000 == 0:
                 x_t_1 = torch.randn_like(real_data)
                 with autocast():
-                    fake_sample = sample_from_model(pos_coeff, netG, args.num_timesteps, x_t_1, T, args, cond=(cond_pooled, cond, cond_mask))
+                    fake_sample = sample_from_model(pos_coeff, netG, args.num_timesteps, x_t_1, T, args, cond=(cond, cond_mask))
                 if rank == 0:
                     torchvision.utils.save_image(fake_sample, os.path.join(exp_path, 'sample_discrete_epoch_{}_iteration_{}.png'.format(epoch, iteration)), normalize=True)
                 
@@ -734,13 +696,15 @@ if __name__ == '__main__':
     parser.add_argument('--resume', action='store_true',default=False)
     parser.add_argument('--masked_mean', action='store_true',default=False)
     parser.add_argument('--mismatch_loss', action='store_true',default=False)
-    parser.add_argument('--text_encoder', type=str, default="google/t5-v1_1-base")
+    parser.add_argument('--text_encoder', type=str, default="openai/clip-vit-large-patch14")
     parser.add_argument('--cross_attention', action='store_true',default=False)
     parser.add_argument('--fsdp', action='store_true',default=False)
     parser.add_argument('--grad_checkpointing', action='store_true',default=False)
 
     parser.add_argument('--image_size', type=int, default=32,
                             help='size of image')
+    parseradd_argument('--caption_column', type=str, default="text")
+    parser.add_argument('--preprocessing_num_workers', type=int, default=32)
     parser.add_argument('--num_channels', type=int, default=3,
                             help='channel of image')
     parser.add_argument('--centered', action='store_false', default=True,
@@ -796,6 +760,7 @@ if __name__ == '__main__':
     parser.add_argument('--nz', type=int, default=100)
     parser.add_argument('--num_timesteps', type=int, default=4)
 
+    parser.add_argument('--cond_size', type=int, default=768)
     parser.add_argument('--z_emb_dim', type=int, default=256)
     parser.add_argument('--t_emb_dim', type=int, default=256)
     parser.add_argument('--batch_size', type=int, default=128, help='input batch size')
@@ -823,7 +788,7 @@ if __name__ == '__main__':
     parser.add_argument('--save_content', action='store_true',default=False)
     parser.add_argument('--save_content_every', type=int, default=50, help='save content for resuming every x epochs')
     parser.add_argument('--save_ckpt_every', type=int, default=25, help='save ckpt every x epochs')
-    parser.add_argument('--discr_type', type=str, default="large")
+    parser.add_argument('--discr_type', type=str, default="large_cond_attn")
     parser.add_argument('--preprocessing', type=str, default="resize")
     parser.add_argument('--precision', type=str, default="fp32")
 

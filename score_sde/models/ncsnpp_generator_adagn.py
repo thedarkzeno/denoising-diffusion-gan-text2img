@@ -302,12 +302,12 @@ class NCSNpp(nn.Module):
       raise ValueError(f'embedding type {self.embedding_type} unknown.')
     
     if cond is not None:
-      cond_pooled, cond, cond_mask = cond
+      cond, cond_mask = cond
     
     if self.conditional:
       temb = modules[m_idx](temb)
-      if cond is not None:
-        temb = temb + self.cond_proj(cond_pooled)
+      # if cond is not None:
+        # temb = temb + self.cond_proj(cond_pooled)
       m_idx += 1
       temb = modules[m_idx](self.act(temb))
       m_idx += 1

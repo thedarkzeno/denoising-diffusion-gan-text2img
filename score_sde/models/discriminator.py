@@ -237,7 +237,7 @@ class SmallCondAttnDiscriminator(nn.Module):
     out = self.final_conv(out)
     out = self.act(out)
     
-    cond_pooled, cond, cond_mask = cond
+    cond, cond_mask = cond
 
     out_cond = (self.cond_attn(out, cond, cond_mask))
 
@@ -338,7 +338,7 @@ class Discriminator_large(nn.Module):
     out = out.view(out.shape[0], out.shape[1], -1).sum(2)
 
     if self.attn_pool is not None:
-        (cond_pooled, cond, cond_mask) = cond
+        (cond, cond_mask) = cond
         if len(cond_mask.shape) == 2:
             cond_mask = cond_mask.view(cond_mask.shape[0], cond_mask.shape[1], 1)
         cond = torch.where(
@@ -392,7 +392,7 @@ class CondAttnDiscriminator(nn.Module):
     
         
   def forward(self, x, t, x_t, cond=None):
-    cond_pooled, cond, cond_mask = cond
+    cond, cond_mask = cond
 
     t_embed = self.t_embed(t)
     t_embed = self.act(t_embed)  
