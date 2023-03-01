@@ -703,7 +703,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--image_size', type=int, default=32,
                             help='size of image')
-    parseradd_argument('--caption_column', type=str, default="text")
+    parser.add_argument('--caption_column', type=str, default="text")
     parser.add_argument('--preprocessing_num_workers', type=int, default=32)
     parser.add_argument('--num_channels', type=int, default=3,
                             help='channel of image')
